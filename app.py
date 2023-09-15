@@ -2,64 +2,91 @@ import streamlit as st
 from langchain import PromptTemplate
 from langchain.document_loaders import YoutubeLoader
 from langchain.chat_models import ChatOpenAI
+from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+from huggingface_hub import InferenceClient
+from templates import BLOG_TEMPLATE, IMAGE_TEMPLATE
 
-# Setting up the page title and header
+CLIENT = InferenceClient()
+
+# Initialize Streamlit
 st.set_page_config(page_title ="📝 Article Generator App")
 st.title('📝 Article Generator App')
 
 # Getting the OpenAI API key from the sidebar
 openai_api_key = st.sidebar.text_input('OpenAI API Key', type='password')
+chat_model = None
+if openai_api_key.startswith('sk-'):
+    chat_model = ChatOpenAI(model_name='gpt-3.5-turbo-16k', openai_api_key=openai_api_key)
+else:
+    st.warning('Please enter a valid OpenAI API key!', icon='⚠')
 
-# A function to generate a blog article from a YouTube URL
-def generate_blog(yt_url, openai_api_key):
-    # Loading the video transcript
+@st.cache_data ()
+def generate_blog(yt_url):
+    """Generate a blog article from a YouTube URL."""
     loader = YoutubeLoader.from_youtube_url(yt_url, add_video_info=True)
     transcript = loader.load()
+
+    """Create a response schema for structured output."""
+    schema = [
+        ResponseSchema(name="title", description="Article title"),
+        ResponseSchema(name="meta_description", description="Article Meta Description"),
+        ResponseSchema(name="content", description="Article content in markdown"),
+    ]
+    output_parser = StructuredOutputParser.from_response_schemas(schema)
+    format_instructions = output_parser.get_format_instructions()
     
-    # Creating an instance of the chat model
-    chat_model = ChatOpenAI(model_name='gpt-3.5-turbo-16k', openai_api_key=openai_api_key)
-    
-    # Creating a prompt template
-    template = """Act as an expert copywriter specializing in content optimization for SEO. Your task is to take a given YouTube transcript and transform it into a well-structured and engaging article. Your objectives are as follows:
+    prompt = PromptTemplate(
+        input_variables=['transcript'],
+        template=BLOG_TEMPLATE,
+        partial_variables={"format_instructions": format_instructions}
+    )
+    prompt_query = prompt.format(transcript=transcript[0].page_content)
 
-        Content Transformation: Begin by thoroughly reading the provided YouTube transcript. Understand the main ideas, key points, and the overall message conveyed.
-
-        Sentence Structure: While rephrasing the content, pay careful attention to sentence structure. Ensure that the article flows logically and coherently.
-
-        Keyword Identification: Identify the main keyword or phrase from the transcript. It's crucial to determine the primary topic that the YouTube video discusses.
-
-        Keyword Integration: Incorporate the identified keyword naturally throughout the article. Use it in headings, subheadings, and within the body text. However, avoid overuse or keyword stuffing, as this can negatively affect SEO.
-
-        Unique Content: Your goal is to make the article 100% unique. Avoid copying sentences directly from the transcript. Rewrite the content in your own words while retaining the original message and meaning.
-
-        SEO Friendliness: Craft the article with SEO best practices in mind. This includes optimizing meta tags (title and meta description), using header tags appropriately, and maintaining an appropriate keyword density.
-
-        Engaging and Informative: Ensure that the article is engaging and informative for the reader. It should provide value and insight on the topic discussed in the YouTube video.
-
-        Proofreading: Proofread the article for grammar, spelling, and punctuation errors. Ensure it is free of any mistakes that could detract from its quality.
-
-        By following these guidelines, create a well-optimized, unique, and informative article that would rank well in search engine results and engage readers effectively.
-
-        Transcript:{transcript}"""
-
-    # Creating a prompt instance and formatting it with the transcript
-    prompt = PromptTemplate(input_variables=['transcript'], template=template)
-    prompt_query = prompt.format(transcript=transcript)
-    
-    # Getting the response from the chat model
     response = chat_model.predict(prompt_query)
     
-    # Returning the response as a markdown formatted text
-    return st.markdown(response)
+    return output_parser.parse(response), transcript[0].metadata["thumbnail_url"]
+
+@st.cache_data ()
+def generate_image(title):
+    """Generate an image based on the title."""
+    prompt = PromptTemplate(
+        input_variables=['title'],
+        template=IMAGE_TEMPLATE,
+    )
+    prompt_query = prompt.format(title=title)
+
+    stb_prompt = chat_model.predict(prompt_query)
+
+    tags = [
+        stb_prompt,
+        'award winning',
+        'high resolution',
+        'photo realistic',
+        'intricate details',
+        'beautiful',
+        '[trending on artstation]'
+    ]
+    result = ', '.join(tags)
+    response = CLIENT.post(json={
+        "inputs": result,
+        "parameters": { "negative_prompt": 'blurry, artificial, cropped, low quality, ugly'}
+    }, model="stabilityai/stable-diffusion-2-1")
+
+    return response
 
 # Creating a form to get the YouTube URL
 with st.form('myform'):
     yt_url = st.text_input('Enter youtube url:', '')
+    generate_image_option = st.checkbox('Generate Image Instead of Thumbnail')
     submitted = st.form_submit_button('Submit')
     
-    # Validating the OpenAI API key and the YouTube URL before generating the blog
-    if not openai_api_key.startswith('sk-'):
-        st.warning('Please enter a valid OpenAI API key!', icon='⚠')
-    if submitted and openai_api_key.startswith('sk-') and yt_url:
+    if submitted and chat_model and yt_url:
         with st.spinner("Generating blog... This may take a while⏳"):
-            generate_blog(yt_url, openai_api_key)
+            blog, thumbnail = generate_blog(yt_url)
+            if generate_image_option:
+                with st.spinner("Generating image... This may take a while⏳"):
+                    image = generate_image(blog['title'])
+                    st.image(image)
+            else:
+                st.image(thumbnail)
+            st.markdown(blog['content'])
